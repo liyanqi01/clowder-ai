@@ -345,6 +345,70 @@ function Test-TruthyEnvFlag {
     }
 }
 
+function Get-ListeningTcpPorts {
+    $ports = New-Object 'System.Collections.Generic.HashSet[int]'
+
+    try {
+        $netstatOutput = & netstat -ano -p tcp 2>$null
+        foreach ($line in $netstatOutput) {
+            if ($line -notmatch 'LISTENING') {
+                continue
+            }
+
+            $columns = @($line -split '\s+' | Where-Object { $_ })
+            if ($columns.Count -lt 4) {
+                continue
+            }
+
+            $localEndpoint = $columns[1]
+            $lastColonIndex = $localEndpoint.LastIndexOf(':')
+            if ($lastColonIndex -lt 0) {
+                continue
+            }
+
+            $portText = $localEndpoint.Substring($lastColonIndex + 1)
+            $port = 0
+            if ([int]::TryParse($portText, [ref]$port)) {
+                $null = $ports.Add($port)
+            }
+        }
+    } catch {
+    }
+
+    return @($ports)
+}
+
+function Get-ExcludedTcpPortRanges {
+    $ranges = @()
+
+    try {
+        $netshOutput = & netsh interface ipv4 show excludedportrange protocol=tcp 2>$null
+        foreach ($line in $netshOutput) {
+            if ($line -match '^\s*(\d+)\s+(\d+)(?:\s+\*)?\s*$') {
+                $ranges += [pscustomobject]@{
+                    Start = [int]$matches[1]
+                    End = [int]$matches[2]
+                }
+            }
+        }
+    } catch {
+    }
+
+    return $ranges
+}
+
+function Test-TcpPortExcluded {
+    param([int]$Port, $ExcludedRanges)
+
+    foreach ($range in @($ExcludedRanges)) {
+        if ($Port -ge $range.Start -and $Port -le $range.End) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
 function Test-TcpPortAvailable {
     param([int]$Port)
 
@@ -359,7 +423,13 @@ function Test-TcpPortAvailable {
         $listener.Start()
         return $true
     } catch {
-        return $false
+        $listeningPorts = Get-ListeningTcpPorts
+        if ($listeningPorts -contains $Port) {
+            return $false
+        }
+
+        $excludedRanges = Get-ExcludedTcpPortRanges
+        return -not (Test-TcpPortExcluded -Port $Port -ExcludedRanges $excludedRanges)
     } finally {
         if ($listener) {
             $listener.Stop()
@@ -380,6 +450,8 @@ function Find-AvailableTcpPort {
             if ($ExcludePorts -notcontains $port) {
                 return $port
             }
+        } catch {
+            break
         } finally {
             if ($listener) {
                 $listener.Stop()
@@ -387,10 +459,41 @@ function Find-AvailableTcpPort {
         }
     }
 
+    $listeningPorts = Get-ListeningTcpPorts
+    $excludedRanges = Get-ExcludedTcpPortRanges
+
+    for ($attempt = 0; $attempt -lt $Attempts; $attempt++) {
+        $port = Get-Random -Minimum 20000 -Maximum 50000
+        if ($ExcludePorts -contains $port) {
+            continue
+        }
+        if ($listeningPorts -contains $port) {
+            continue
+        }
+        if (Test-TcpPortExcluded -Port $port -ExcludedRanges $excludedRanges) {
+            continue
+        }
+        return $port
+    }
+
+    for ($port = 20000; $port -lt 50000; $port++) {
+        if ($ExcludePorts -contains $port) {
+            continue
+        }
+        if ($listeningPorts -contains $port) {
+            continue
+        }
+        if (Test-TcpPortExcluded -Port $port -ExcludedRanges $excludedRanges) {
+            continue
+        }
+        return $port
+    }
+
     throw "Could not find an available TCP port"
 }
 
 function Read-WindowsRuntimeStateFile {
+
     param([string]$StateFile)
 
     if (-not $StateFile -or -not (Test-Path $StateFile)) {

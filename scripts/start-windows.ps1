@@ -137,14 +137,102 @@ function Get-ManagedProcessId {
     }
 }
 
-function Clear-ManagedProcessId {
-    param([string]$PidFile)
-    Remove-Item $PidFile -ErrorAction SilentlyContinue
+function Clear-ManagedProcessId {
+    param([string]$PidFile)
+    Remove-Item $PidFile -ErrorAction SilentlyContinue
+}
+
+function Get-TcpListeningConnections {
+    param([int]$Port)
+
+    $connections = @()
+    try {
+        $netstatOutput = & netstat -ano -p tcp 2>$null
+        foreach ($line in $netstatOutput) {
+            if ($line -notmatch 'LISTENING') {
+                continue
+            }
+
+            $columns = @($line -split '\s+' | Where-Object { $_ })
+            if ($columns.Count -lt 5) {
+                continue
+            }
+
+            $localEndpoint = $columns[1]
+            $lastColonIndex = $localEndpoint.LastIndexOf(':')
+            if ($lastColonIndex -lt 0) {
+                continue
+            }
+
+            $parsedPort = 0
+            if (-not [int]::TryParse($localEndpoint.Substring($lastColonIndex + 1), [ref]$parsedPort)) {
+                continue
+            }
+
+            if ($parsedPort -ne $Port) {
+                continue
+            }
+
+            $owningProcess = 0
+            [int]::TryParse($columns[-1], [ref]$owningProcess) | Out-Null
+            $connections += [pscustomobject]@{
+                LocalPort = $parsedPort
+                OwningProcess = $owningProcess
+            }
+        }
+    } catch {
+    }
+
+    return $connections
+}
+
+function Get-TcpListeningConnections {
+    param([int]$Port)
+
+    $connections = @()
+    try {
+        $netstatOutput = & netstat -ano -p tcp 2>$null
+        foreach ($line in $netstatOutput) {
+            if ($line -notmatch 'LISTENING') {
+                continue
+            }
+
+            $columns = @($line -split '\s+' | Where-Object { $_ })
+            if ($columns.Count -lt 5) {
+                continue
+            }
+
+            $localEndpoint = $columns[1]
+            $lastColonIndex = $localEndpoint.LastIndexOf(':')
+            if ($lastColonIndex -lt 0) {
+                continue
+            }
+
+            $parsedPort = 0
+            if (-not [int]::TryParse($localEndpoint.Substring($lastColonIndex + 1), [ref]$parsedPort)) {
+                continue
+            }
+
+            if ($parsedPort -ne $Port) {
+                continue
+            }
+
+            $owningProcess = 0
+            [int]::TryParse($columns[-1], [ref]$owningProcess) | Out-Null
+            $connections += [pscustomobject]@{
+                LocalPort = $parsedPort
+                OwningProcess = $owningProcess
+            }
+        }
+    } catch {
+    }
+
+    return $connections
 }
 
 function Set-ManagedProcessId {
     param([int]$Port, [string]$PidFile)
-    $listener = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+    $listener = Get-TcpListeningConnections -Port $Port | Select-Object -First 1
     if ($listener) {
         Set-Content -Path $PidFile -Value "$($listener.OwningProcess)" -Encoding ASCII
     }
@@ -174,7 +262,7 @@ function Test-ClowderOwnedProcess {
 
 function Stop-PortProcess {
     param([int]$Port, [string]$Name, [string]$PidFile, [string]$ProjectRoot)
-    $connections = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+    $connections = Get-TcpListeningConnections -Port $Port
     if ($connections) {
         $managedPid = Get-ManagedProcessId -PidFile $PidFile
         foreach ($conn in $connections) {
@@ -326,7 +414,7 @@ if ($useExternalRedis) {
         }
         $redisPing = & $redisCliPath -p $RedisPort @redisAuthArgs ping 2>$null
         if ($redisPing -eq "PONG") {
-            $redisConnections = Get-NetTCPConnection -LocalPort $RedisPort -State Listen -ErrorAction SilentlyContinue
+            $redisConnections = Get-TcpListeningConnections -Port $RedisPort
             if (-not $redisConnections) {
                 throw "not running"
             }

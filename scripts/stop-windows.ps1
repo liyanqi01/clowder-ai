@@ -85,6 +85,50 @@ function Get-ManagedProcessId {
     }
 }
 
+function Get-TcpListeningConnections {
+    param([int]$Port)
+
+    $connections = @()
+    try {
+        $netstatOutput = & netstat -ano -p tcp 2>$null
+        foreach ($line in $netstatOutput) {
+            if ($line -notmatch 'LISTENING') {
+                continue
+            }
+
+            $columns = @($line -split '\s+' | Where-Object { $_ })
+            if ($columns.Count -lt 5) {
+                continue
+            }
+
+            $localEndpoint = $columns[1]
+            $lastColonIndex = $localEndpoint.LastIndexOf(':')
+            if ($lastColonIndex -lt 0) {
+                continue
+            }
+
+            $parsedPort = 0
+            if (-not [int]::TryParse($localEndpoint.Substring($lastColonIndex + 1), [ref]$parsedPort)) {
+                continue
+            }
+
+            if ($parsedPort -ne $Port) {
+                continue
+            }
+
+            $owningProcess = 0
+            [int]::TryParse($columns[-1], [ref]$owningProcess) | Out-Null
+            $connections += [pscustomobject]@{
+                LocalPort = $parsedPort
+                OwningProcess = $owningProcess
+            }
+        }
+    } catch {
+    }
+
+    return $connections
+}
+
 function Get-ProcessCommandLine {
     param([int]$ProcessId)
     try {
@@ -110,7 +154,7 @@ function Test-ClowderOwnedProcess {
 
 function Stop-PortProcess {
     param([int]$Port, [string]$Name, [string]$PidFile, [string]$ProjectRoot)
-    $connections = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+    $connections = Get-TcpListeningConnections -Port $Port
     if ($connections) {
         $managedPid = Get-ManagedProcessId -ManagedPidFile $PidFile
         $stopped = $false
@@ -177,7 +221,7 @@ if ($configuredRedisUrl -and -not (Test-LocalRedisUrl -RedisUrl $configuredRedis
         if (-not $redisCommands -or -not $redisCommands.CliPath) {
             throw "redis-cli unavailable"
         }
-        $redisConnections = Get-NetTCPConnection -LocalPort $RedisPort -State Listen -ErrorAction SilentlyContinue
+        $redisConnections = Get-TcpListeningConnections -Port $RedisPort
         if (-not $redisConnections) {
             Write-Warn "Redis (port $RedisPort) - not running"
         } else {
